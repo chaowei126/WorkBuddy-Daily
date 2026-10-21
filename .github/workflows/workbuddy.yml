@@ -56,7 +56,7 @@ jobs:
           WORKBUDDY_SKIP_TASKS: ${{ secrets.WORKBUDDY_SKIP_TASKS }}
           WORKBUDDY_MP_GAP: ${{ secrets.WORKBUDDY_MP_GAP }}
           WORKBUDDY_MAKEUP_MAX_PER_RUN: ${{ secrets.WORKBUDDY_MAKEUP_MAX_PER_RUN }}
-        run: python workbuddy_daily.py
+        run: python workbuddy_intl_daily.py
 
       # ⚠️ 仅在【私有仓库】中持久化令牌/福利期次状态；公开仓库会跳过，避免 RT 泄露
       - name: Persist runtime state (private repo only)
