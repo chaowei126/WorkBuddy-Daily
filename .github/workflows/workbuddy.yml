@@ -1,26 +1,28 @@
-name: 🌱 WorkBuddy Daily
+name: 🌱 WorkBuddy International Daily
 
 on:
   schedule:
-    # 北京时间 07:00 / 12:00 / 23:30（GitHub cron 用 UTC，北京时间 = UTC+8）
-    - cron: "0 23 * * *"     # 07:00
-    - cron: "0 4 * * *"      # 12:00
-    - cron: "30 15 * * *"    # 23:30
-  workflow_dispatch:          # 支持手动触发
+    # 北京时间 07:00 / 12:00 / 23:30（UTC+8）
+    - cron: "0 23 * * *"
+    - cron: "0 4 * * *"
+    - cron: "30 15 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: workbuddy
+  group: workbuddy-intl
   cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45   # mp 对话任务按真人节奏上报（每条 45s±10s），账号多时耗时更长
+    timeout-minutes: 20
     env:
-      TZ: Asia/Shanghai   # runner 默认 UTC：不加会把日志时间与补签日期算错一天
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,44 +33,109 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install requests
+        run: python -m pip install requests
 
-      - name: Restore benefit guard
-        uses: actions/cache@v4
-        with:
-          path: workbuddy_benefit_state.json
-          key: workbuddy-benefit-state-${{ github.run_id }}
-          restore-keys: |
-            workbuddy-benefit-state-
-
-      - name: Run WorkBuddy
+      # 使用仓库中已保存的最新令牌，避免每次都从旧 Secret 开始
+      - name: Prepare international tokens
         env:
-          WORKBUDDY_REFRESH_TOKEN: ${{ secrets.WORKBUDDY_REFRESH_TOKEN }}
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          BARK_URL: ${{ secrets.BARK_URL }}
-          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
-          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
-          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
-          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-          WORKBUDDY_TASKS: ${{ secrets.WORKBUDDY_TASKS }}
-          WORKBUDDY_SKIP_TASKS: ${{ secrets.WORKBUDDY_SKIP_TASKS }}
-          WORKBUDDY_MP_GAP: ${{ secrets.WORKBUDDY_MP_GAP }}
-          WORKBUDDY_MAKEUP_MAX_PER_RUN: ${{ secrets.WORKBUDDY_MAKEUP_MAX_PER_RUN }}
+          WORKBUDDY_INTL_TOKENS: ${{ secrets.WORKBUDDY_INTL_TOKENS }}
+          WORKBUDDY_TOKEN: ${{ secrets.WORKBUDDY_TOKEN }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+
+          raw = (
+              os.environ.get("WORKBUDDY_INTL_TOKENS", "").strip()
+              or os.environ.get("WORKBUDDY_TOKEN", "").strip()
+          )
+          if not raw:
+              raise SystemExit(
+                  "未配置 WORKBUDDY_INTL_TOKENS 或 WORKBUDDY_TOKEN"
+              )
+
+          store_path = "wb_intl_tokens.json"
+          try:
+              with open(store_path, encoding="utf-8") as f:
+                  store = json.load(f)
+              if not isinstance(store, dict):
+                  store = {}
+          except (OSError, ValueError):
+              store = {}
+
+          def token_uid(token):
+              try:
+                  payload = token.split(".")[1]
+                  payload += "=" * (-len(payload) % 4)
+                  data = json.loads(
+                      base64.urlsafe_b64decode(payload)
+                  )
+                  return str(data.get("sub") or "")
+              except Exception:
+                  return ""
+
+          output = []
+          for index, line in enumerate(
+              raw.replace("&", "\n").splitlines(), 1
+          ):
+              line = line.strip().strip("\"'")
+              if not line or line.startswith("#"):
+                  continue
+
+              parts = [p.strip() for p in line.split("|")]
+              note = "账号%d" % index
+              token = uid = rt = ""
+
+              if len(parts) == 1:
+                  token = parts[0]
+              elif len(parts) == 2:
+                  note, token = parts
+              elif len(parts) == 3:
+                  note, token, uid = parts
+              else:
+                  note, token, uid, rt = parts[:4]
+
+              if not token:
+                  continue
+
+              uid = uid or token_uid(token)
+              saved = store.get(uid or note, {})
+              if isinstance(saved, dict) and saved.get("refresh_token"):
+                  token = saved.get("access_token") or token
+                  rt = saved["refresh_token"]
+
+              output.append("|".join((note, token, uid, rt)))
+
+          if not output:
+              raise SystemExit("未解析到有效账号")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write("WORKBUDDY_INTL_TOKENS<<WB_INTL_EOF\n")
+              f.write("\n".join(output))
+              f.write("\nWB_INTL_EOF\n")
+
+          print("已准备 %d 个国际版账号（不输出令牌）" % len(output))
+          PY
+
+      - name: Run WorkBuddy International
+        env:
+          WORKBUDDY_INTL_MODELS: ${{ secrets.WORKBUDDY_INTL_MODELS }}
+          QYWX_TOKEN: ${{ secrets.QYWX_TOKEN }}
+          PLUSPLUS_TOKEN: ${{ secrets.PLUSPLUS_TOKEN }}
         run: python workbuddy_intl_daily.py
 
-      # ⚠️ 仅在【私有仓库】中持久化令牌/福利期次状态；公开仓库会跳过，避免 RT 泄露
-      - name: Persist runtime state (private repo only)
+      # 仅私有仓库提交令牌状态；公开仓库禁止持久化
+      - name: Persist international token state
         if: always() && github.event.repository.private == true
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f wb_refresh_tokens.json 2>/dev/null || true
-          git add -f workbuddy_benefit_state.json 2>/dev/null || true
+          git add -f wb_intl_tokens.json 2>/dev/null || true
+
           if git diff --cached --quiet; then
-            echo "运行状态无变化"
+            echo "令牌状态无变化"
           else
-            git commit -m "chore: 更新运行状态 [skip ci]"
+            git commit -m "chore: 更新国际版令牌状态 [skip ci]"
             git push
           fi
